@@ -1,0 +1,4 @@
+zone "chema.osvp" {
+    type master;
+    file "/etc/bind/db.chema.osvp";
+};

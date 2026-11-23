@@ -1,0 +1,117 @@
+name: practica-03-logs
+
+services:
+  dns:
+    image: ubuntu/bind9:latest
+    container_name: dns
+    hostname: ns1
+    networks:
+      red_logs:
+        ipv4_address: ${DNS_IP}
+    volumes:
+      - ./bind/named.conf.local:/etc/bind/named.conf.local:ro
+      - ./bind/named.conf.options:/etc/bind/named.conf.options:ro
+      - ./bind/db.${DOMINIO}:/etc/bind/db.${DOMINIO}:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    restart: unless-stopped
+
+  web:
+    image: httpd:alpine
+    container_name: web
+    hostname: web
+    networks:
+      red_logs:
+        ipv4_address: ${WEB_IP}
+    volumes:
+      - ./apache/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./apache/html:/usr/local/apache2/htdocs:ro
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  dhcp:
+    image: networkboot/dhcpd:latest
+    container_name: dhcp
+    hostname: dhcp
+    networks:
+      red_logs:
+        ipv4_address: ${DHCP_IP}
+    volumes:
+      - ./dhcpd.conf:/data/dhcpd.conf:ro
+    restart: unless-stopped
+
+  ftp:
+    image: fauria/vsftpd
+    container_name: ftp
+    hostname: ftp
+    networks:
+      red_logs:
+        ipv4_address: ${FTP_IP}
+    environment:
+      - FTP_USER=${FTP_USER}
+      - FTP_PASS=${FTP_PASS}
+      - PASV_ADDRESS=${FTP_IP}
+      - PASV_MIN_PORT=21100
+      - PASV_MAX_PORT=21110
+      - LOG_STDOUT=1
+    # La imagen manda la salida de vsftpd a /dev/null y escribe los eventos
+    # (CONNECT, OK LOGIN, FAIL LOGIN, transferencias) en /var/log/vsftpd.log.
+    # Con 'tail -F' ese archivo aparece en 'docker logs ftp'.
+    command: ["/bin/bash", "-c", "touch /var/log/vsftpd.log && (tail -F /var/log/vsftpd.log &) && exec /usr/sbin/run-vsftpd.sh"]
+    ports:
+      - "21:21"
+      - "21100-21110:21100-21110"
+    restart: unless-stopped
+
+  pc1:
+    build:
+      context: .
+      dockerfile: Dockerfile.pc
+      args:
+        PC_ROOT_PASSWORD: ${PC_ROOT_PASSWORD}
+    image: pc-logs-client:latest
+    container_name: pc1
+    hostname: pc1
+    networks:
+      - red_logs
+    ports:
+      - "${SSH_PC1_PORT}:22"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - dns
+      - dhcp
+      - web
+      - ftp
+    restart: unless-stopped
+
+  pc2:
+    build:
+      context: .
+      dockerfile: Dockerfile.pc
+      args:
+        PC_ROOT_PASSWORD: ${PC_ROOT_PASSWORD}
+    image: pc-logs-client:latest
+    container_name: pc2
+    hostname: pc2
+    networks:
+      - red_logs
+    ports:
+      - "${SSH_PC2_PORT}:22"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - dns
+      - dhcp
+      - web
+      - ftp
+    restart: unless-stopped
+
+networks:
+  red_logs:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${SUBRED}
