@@ -1,0 +1,28 @@
+FROM ubuntu:22.04
+ARG PC_ROOT_PASSWORD=osvp2026
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Notas para que dhclient aplique el DNS recibido por DHCP dentro del contenedor:
+#  - Se quitan los hooks de systemd-resolved (no hay systemd en el contenedor).
+#  - Docker monta /etc/resolv.conf como archivo y 'mv' falla sobre el, asi que
+#    se cambia ese 'mv' por 'cat >' en /sbin/dhclient-script.
+# netbase aporta /etc/services, necesario para el cliente ftp.
+RUN apt-get update && \
+    apt-get install -y \
+        openssh-server \
+        isc-dhcp-client \
+        iproute2 \
+        iputils-ping \
+        dnsutils \
+        curl \
+        ftp \
+        netbase && \
+    mkdir -p /run/sshd && \
+    echo "root:${PC_ROOT_PASSWORD}" | chpasswd && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    rm -f /etc/dhcp/dhclient-enter-hooks.d/resolved-enter /etc/dhcp/dhclient-exit-hooks.d/resolved && \
+    sed -i 's|mv -f $new_resolv_conf $resolv_conf|cat $new_resolv_conf > $resolv_conf; rm -f $new_resolv_conf|' /sbin/dhclient-script
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]

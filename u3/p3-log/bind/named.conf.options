@@ -1,0 +1,21 @@
+options {
+    directory "/var/cache/bind";
+    recursion yes;
+    allow-query { any; };
+    allow-recursion { 192.168.30.0/24; 127.0.0.1; };
+    forwarders { 8.8.8.8; 1.1.1.1; };
+    dnssec-validation auto;
+    listen-on-v6 { any; };
+};
+
+logging {
+    channel default_debug {
+        stderr;
+        severity info;
+        print-time yes;
+        print-category yes;
+        print-severity yes;
+    };
+    category queries { default_debug; };
+    category default { default_debug; };
+};
