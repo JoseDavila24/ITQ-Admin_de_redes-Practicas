@@ -3,9 +3,10 @@ ARG PC_ROOT_PASSWORD=osvp2026
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Herramientas: ip (iproute2), dhclient, ssh, ufw (firewall), ping, dig, curl, ftp
+# rsyslog: guarda el log de SSH en /var/log/auth.log, como en un Ubuntu normal
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        iproute2 isc-dhcp-client openssh-server openssh-client ufw \
+        iproute2 isc-dhcp-client openssh-server openssh-client ufw rsyslog \
         iputils-ping dnsutils curl ftp netbase && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /run/sshd && \
@@ -17,10 +18,12 @@ RUN apt-get update && \
     sed -i 's|mv -f $new_resolv_conf $resolv_conf|cat $new_resolv_conf > $resolv_conf; rm -f $new_resolv_conf|' /sbin/dhclient-script && \
     # ufw dentro de un contenedor: sin IPv6 y sin tocar /proc/sys (es de solo lectura)
     sed -i 's/^IPV6=.*/IPV6=no/' /etc/default/ufw && \
-    sed -i 's|^IPT_SYSCTL=.*|IPT_SYSCTL=/dev/null|' /etc/default/ufw
+    sed -i 's|^IPT_SYSCTL=.*|IPT_SYSCTL=/dev/null|' /etc/default/ufw && \
+    # rsyslog dentro de un contenedor: sin leer el log del kernel (no hay permiso)
+    sed -i '/imklog/s/^/#/' /etc/rsyslog.conf
 
 EXPOSE 22
 
-# Al arrancar: abre el puerto 22 en el firewall, lo activa e inicia SSH.
-# "sshd -e" manda el log de SSH a "docker logs pcX".
-CMD ["bash", "-c", "ufw allow 22/tcp >/dev/null && ufw --force enable || echo 'AVISO: no se pudo activar ufw'; exec /usr/sbin/sshd -D -e"]
+# Al arrancar: abre el puerto 22 en el firewall y lo activa, inicia rsyslog
+# (escribe /var/log/auth.log) y por ultimo el servidor SSH.
+CMD ["bash", "-c", "ufw allow 22/tcp >/dev/null && ufw --force enable || echo 'AVISO: no se pudo activar ufw'; rsyslogd; exec /usr/sbin/sshd -D"]

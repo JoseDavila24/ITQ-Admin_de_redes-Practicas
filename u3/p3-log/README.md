@@ -14,11 +14,11 @@ Red `192.168.30.0/24`, dominio `chema.osvp`, 6 contenedores:
 | `dns`      | BIND9 (DNS)       | 192.168.30.4    | **No:** la imagen envía todo a la salida del contenedor, así que se ve con `docker logs dns` |
 | `dhcp`     | ISC DHCP          | 192.168.30.254  | **No** para los mensajes (`docker logs dhcp`). **Sí** guarda los arrendamientos en `/data/dhcpd.leases` |
 | `ftp`      | vsftpd (extra)    | 192.168.30.6    | **Sí:** `/var/log/vsftpd.log`                                                             |
-| `pc1`      | Cliente           | 192.168.30.100  | Su arrendamiento: `/var/lib/dhcp/dhclient.leases` · SSH: `docker logs pc1`                |
+| `pc1`      | Cliente           | 192.168.30.100  | **Sí:** SSH en `/var/log/auth.log` · DHCP del cliente en `/var/log/syslog` · arrendamiento en `/var/lib/dhcp/dhclient.leases` |
 | `pc2`      | Cliente           | 192.168.30.101  | Igual que pc1                                                                             |
 
-Los PCs (`pc1`, `pc2`) son Ubuntu con `ip`, `dhclient`, `ssh`, `ping`, `dig`, `curl`, `ftp` y el
-firewall **ufw activo**. Al arrancar, ufw abre solo el puerto **22 (SSH)** y bloquea las demás
+Los PCs (`pc1`, `pc2`) son Ubuntu con `ip`, `dhclient`, `ssh`, `ping`, `dig`, `curl`, `ftp`,
+`rsyslog` (escribe los logs en `/var/log/`, como un Ubuntu normal) y el firewall **ufw activo**. Al arrancar, ufw abre solo el puerto **22 (SSH)** y bloquea las demás
 conexiones de entrada.
 
 ---
@@ -211,6 +211,8 @@ Usa **dos terminales**: en la **Terminal 1** dejas el log abierto (`-f` = seguir
 | dhcp – mensajes          | —                           | *(sin archivo de log)* desde el host: `docker logs -f dhcp`          |
 | dhcp – arrendamientos    | `docker exec -it dhcp bash` | `tail -f /data/dhcpd.leases`                                         |
 | pc1 – su arrendamiento   | `docker exec -it pc1 bash`  | `cat /var/lib/dhcp/dhclient.leases`                                  |
+| pc1 – DHCP del cliente   | `docker exec -it pc1 bash`  | `tail -f /var/log/syslog`                                            |
+| pc1/pc2 – SSH            | `docker exec -it pc2 bash`  | `tail -f /var/log/auth.log`                                          |
 | ftp                      | `docker exec -it ftp bash`  | `tail -f /var/log/vsftpd.log`                                        |
 
 `web` usa Alpine, que no tiene `bash`; por eso se entra con `sh`. Para salir de un
@@ -459,10 +461,19 @@ docker compose restart pc1
 docker exec pc1 bash -c "ip addr flush dev eth0 && dhclient -v eth0"
 ```
 
-**e) El arrendamiento visto desde el cliente:**
+**e) Lo mismo visto desde el cliente.** Cada PC tiene su propio log de `dhclient` y el archivo
+de su arrendamiento:
 
 ```bash
-docker exec pc2 cat /var/lib/dhcp/dhclient.leases
+docker exec -it pc2 bash
+```
+
+```bash
+tail -f /var/log/syslog
+```
+
+```bash
+cat /var/lib/dhcp/dhclient.leases
 ```
 
 **Lo que aparece en `docker logs dhcp`:**
@@ -495,6 +506,16 @@ lease 192.168.30.102 {
 }
 ```
 
+**Lo que aparece en `/var/log/syslog` del cliente (pc2):** la asignación y, un minuto
+después, la renovación (REQUEST directo al servidor `192.168.30.254`, sin DISCOVER):
+
+```
+Nov 25 14:21:05 pc2 dhclient[176]: bound to 192.168.30.101 -- renewal in 57 seconds.
+Nov 25 14:22:02 pc2 dhclient[176]: DHCPREQUEST for 192.168.30.101 on eth0 to 192.168.30.254 port 67 (xid=0x546f3d42)
+Nov 25 14:22:02 pc2 dhclient[176]: DHCPACK of 192.168.30.101 from 192.168.30.254 (xid=0x423d6f54)
+Nov 25 14:22:02 pc2 dhclient[176]: bound to 192.168.30.101 -- renewal in 55 seconds.
+```
+
 **Lo que hay en `/var/lib/dhcp/dhclient.leases` (cliente pc2):**
 
 ```
@@ -513,13 +534,93 @@ lease {
 | DISCOVER / OFFER / REQUEST / ACK   | `docker logs dhcp` (a)                                                           |
 | MAC de los clientes                | `from 02:00:00:00:00:01 (pc1)` · `hardware ethernet` en `dhcpd.leases`. Son fijas: pc1 `…:01`, pc2 `…:02` |
 | IP asignada y tiempo de concesión  | `DHCPACK on 192.168.30.100` · `starts`/`ends` (2 min) · en el cliente: `dhcp-lease-time 120`, `renew`, `expire` |
-| Renovaciones                       | `DHCPREQUEST` + `DHCPACK` **sin** DISCOVER antes, cada ~1 minuto (b)             |
+| Renovaciones                       | `DHCPREQUEST` + `DHCPACK` **sin** DISCOVER antes, cada ~1 minuto (b) · en el cliente: `/var/log/syslog` |
 | Liberación (DHCPRELEASE)           | `DHCPRELEASE of 192.168.30.100 … (found)` (c)                                    |
 | Conflicto de IP                    | `ICMP Echo reply …` + `Abandoning IP address …: pinged before offer` · `binding state abandoned` (d) |
 
-Las fechas de `dhcpd.leases` están en **UTC** (en México, 6 horas más que la hora local).
+Las fechas de los logs y de `dhcpd.leases` están en **UTC** (en México, 6 horas más que la hora local).
 
 ---
+
+## Extra – Logs SSH
+
+Cada PC guarda los accesos por SSH en **`/var/log/auth.log`**, dentro del contenedor: inicios de
+sesión correctos, contraseñas incorrectas, usuarios que no existen y desconexiones.
+
+**Terminal 1** – entra a pc2 y sigue su log de SSH:
+
+```bash
+docker exec -it pc2 bash
+```
+
+```bash
+tail -f /var/log/auth.log
+```
+
+**Terminal 2** – conéctate a pc2 desde pc1. Prueba los tres casos:
+
+```bash
+docker exec -it pc1 ssh root@pc2.chema.osvp
+```
+
+La primera vez SSH pregunta `Are you sure you want to continue connecting (yes/no)?`: escribe
+`yes`. Con la contraseña correcta (`osvp2026`) entras; luego escribe `exit`.
+
+```bash
+docker exec -it pc1 ssh root@pc2.chema.osvp
+```
+
+Esta vez escribe una contraseña incorrecta.
+
+```bash
+docker exec -it pc1 ssh alumno@pc2.chema.osvp
+```
+
+El usuario `alumno` no existe en pc2.
+
+También puedes conectarte desde el host a la IP: `ssh root@192.168.30.101` (ver paso 4).
+
+**Lo que aparece en `/var/log/auth.log` de pc2:**
+
+```
+Nov 25 14:20:59 pc2 sshd[1]: Server listening on 0.0.0.0 port 22.
+Nov 25 14:21:05 pc2 sshd[195]: Accepted password for root from 192.168.30.100 port 48050 ssh2
+Nov 25 14:21:05 pc2 sshd[195]: pam_unix(sshd:session): session opened for user root(uid=0) by (uid=0)
+Nov 25 14:21:05 pc2 sshd[195]: Disconnected from user root 192.168.30.100 port 48050
+Nov 25 14:21:05 pc2 sshd[195]: pam_unix(sshd:session): session closed for user root
+Nov 25 14:21:07 pc2 sshd[207]: Failed password for root from 192.168.30.100 port 48058 ssh2
+Nov 25 14:21:08 pc2 sshd[209]: Invalid user alumno from 192.168.30.100 port 48066
+Nov 25 14:21:10 pc2 sshd[209]: Failed password for invalid user alumno from 192.168.30.100 port 48066 ssh2
+```
+
+Cómo leer una línea:
+
+```
+Nov 25 14:21:05   pc2     sshd[195]:   Accepted password  for root   from 192.168.30.100 port 48050
+ fecha y hora    equipo  programa[PID]    resultado        usuario       IP y puerto de origen
+```
+
+| Qué buscar                   | Línea en `auth.log`                                          |
+|------------------------------|--------------------------------------------------------------|
+| Inicio de sesión correcto    | `Accepted password for root from …`                          |
+| Contraseña incorrecta        | `Failed password for root from …`                            |
+| Usuario que no existe        | `Invalid user alumno from …`                                 |
+| Abrir y cerrar sesión        | `session opened for user root` / `session closed for user root` |
+| IP de origen                 | `from 192.168.30.100` (pc1)                                  |
+
+Atajos para resumir el log:
+
+```bash
+docker exec pc2 grep "Failed password" /var/log/auth.log
+```
+
+Muestra solo los intentos fallidos.
+
+```bash
+docker exec pc2 lastb
+```
+
+Lista los inicios de sesión fallidos (usuario, IP y hora).
 
 ## Extra – Logs FTP
 
@@ -589,7 +690,7 @@ Al bajar los contenedores también se borran sus logs.
 p3-log/
 ├── .env                  # IPs, puertos y contraseñas
 ├── compose.yaml          # los 6 contenedores
-├── Dockerfile.pc         # imagen de pc1/pc2: ip, dhclient, ssh, ufw, dig, curl, ftp
+├── Dockerfile.pc         # imagen de pc1/pc2: ip, dhclient, ssh, ufw, rsyslog, dig, curl, ftp
 ├── dhcpd.conf            # rango .100–.150, concesión de 2 min, ping-check
 ├── bind/
 │   ├── named.conf.options   # recursión, forwarders, querylog y responselog
