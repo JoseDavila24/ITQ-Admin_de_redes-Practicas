@@ -1,21 +1,14 @@
 options {
     directory "/var/cache/bind";
-    recursion yes;
+
+    // Responde a cualquiera; resuelve dominios externos solo para la red de la practica
     allow-query { any; };
+    recursion yes;
     allow-recursion { 192.168.30.0/24; 127.0.0.1; };
     forwarders { 8.8.8.8; 1.1.1.1; };
     dnssec-validation auto;
-    listen-on-v6 { any; };
-};
 
-logging {
-    channel default_debug {
-        stderr;
-        severity info;
-        print-time yes;
-        print-category yes;
-        print-severity yes;
-    };
-    category queries { default_debug; };
-    category default { default_debug; };
+    // Logs: registrar cada pregunta (querylog) y cada respuesta (responselog)
+    querylog yes;
+    responselog yes;
 };

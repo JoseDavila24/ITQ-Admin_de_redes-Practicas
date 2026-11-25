@@ -2,27 +2,25 @@ FROM ubuntu:22.04
 ARG PC_ROOT_PASSWORD=osvp2026
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Notas para que dhclient aplique el DNS recibido por DHCP dentro del contenedor:
-#  - Se quitan los hooks de systemd-resolved (no hay systemd en el contenedor).
-#  - Docker monta /etc/resolv.conf como archivo y 'mv' falla sobre el, asi que
-#    se cambia ese 'mv' por 'cat >' en /sbin/dhclient-script.
-# netbase aporta /etc/services, necesario para el cliente ftp.
+# Herramientas: ip (iproute2), dhclient, ssh, ufw (firewall), ping, dig, curl, ftp
 RUN apt-get update && \
-    apt-get install -y \
-        openssh-server \
-        isc-dhcp-client \
-        iproute2 \
-        iputils-ping \
-        dnsutils \
-        curl \
-        ftp \
-        netbase && \
+    apt-get install -y --no-install-recommends \
+        iproute2 isc-dhcp-client openssh-server openssh-client ufw \
+        iputils-ping dnsutils curl ftp netbase && \
+    rm -rf /var/lib/apt/lists/* && \
     mkdir -p /run/sshd && \
     echo "root:${PC_ROOT_PASSWORD}" | chpasswd && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    # Para que dhclient pueda escribir el DNS recibido en /etc/resolv.conf dentro de Docker
     rm -f /etc/dhcp/dhclient-enter-hooks.d/resolved-enter /etc/dhcp/dhclient-exit-hooks.d/resolved && \
-    sed -i 's|mv -f $new_resolv_conf $resolv_conf|cat $new_resolv_conf > $resolv_conf; rm -f $new_resolv_conf|' /sbin/dhclient-script
+    sed -i 's|mv -f $new_resolv_conf $resolv_conf|cat $new_resolv_conf > $resolv_conf; rm -f $new_resolv_conf|' /sbin/dhclient-script && \
+    # ufw dentro de un contenedor: sin IPv6 y sin tocar /proc/sys (es de solo lectura)
+    sed -i 's/^IPV6=.*/IPV6=no/' /etc/default/ufw && \
+    sed -i 's|^IPT_SYSCTL=.*|IPT_SYSCTL=/dev/null|' /etc/default/ufw
 
 EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D"]
+
+# Al arrancar: abre el puerto 22 en el firewall, lo activa e inicia SSH.
+# "sshd -e" manda el log de SSH a "docker logs pcX".
+CMD ["bash", "-c", "ufw allow 22/tcp >/dev/null && ufw --force enable || echo 'AVISO: no se pudo activar ufw'; exec /usr/sbin/sshd -D -e"]

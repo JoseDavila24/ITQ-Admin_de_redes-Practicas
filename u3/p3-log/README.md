@@ -1,22 +1,108 @@
-# Práctica 03 – Análisis de logs (HTTP, DNS, DHCP)
+# Práctica 03 – Análisis de logs (HTTP, DNS y DHCP)
 
 **Objetivo:** analizar los archivos de registro (logs) de servicios de red en contenedores
-e identificar patrones, errores y eventos para diagnosticar su funcionamiento.
+(HTTP, DNS y DHCP) e identificar patrones, errores y eventos que permitan diagnosticar su
+funcionamiento.
 
-| Contenedor | Servicio       | IP             | Shell  | Log del servicio                                         |
-|------------|----------------|----------------|--------|----------------------------------------------------------|
-| `web`      | Apache         | 192.168.30.5   | `sh`   | `/usr/local/apache2/logs/access_log` y `error_log`       |
-| `dns`      | BIND9          | 192.168.30.4   | `bash` | Solo en `docker logs dns` (ver nota en la Parte 2)       |
-| `dhcp`     | ISC DHCP       | 192.168.30.254 | `bash` | `/data/dhcpd.leases` + mensajes en `docker logs dhcp`    |
-| `ftp`      | vsftpd         | 192.168.30.6   | `bash` | `/var/log/vsftpd.log`                                    |
-| `pc1/pc2`  | Clientes       | .100 / .101    | `bash` | `/var/lib/dhcp/dhclient.leases` (concesión del cliente)  |
+## 0. ¿Qué hay en la red?
+
+Red `192.168.30.0/24`, dominio `chema.osvp`, 6 contenedores:
+
+| Contenedor | Servicio          | IP              | ¿Guarda archivo de log?                                                                  |
+|------------|-------------------|-----------------|-------------------------------------------------------------------------------------------|
+| `web`      | Apache (HTTP)     | 192.168.30.5    | **Sí:** `/usr/local/apache2/logs/access_log` y `error_log`                                |
+| `dns`      | BIND9 (DNS)       | 192.168.30.4    | **No:** la imagen envía todo a la salida del contenedor, así que se ve con `docker logs dns` |
+| `dhcp`     | ISC DHCP          | 192.168.30.254  | **No** para los mensajes (`docker logs dhcp`). **Sí** guarda los arrendamientos en `/data/dhcpd.leases` |
+| `ftp`      | vsftpd (extra)    | 192.168.30.6    | **Sí:** `/var/log/vsftpd.log`                                                             |
+| `pc1`      | Cliente           | 192.168.30.100  | Su arrendamiento: `/var/lib/dhcp/dhclient.leases` · SSH: `docker logs pc1`                |
+| `pc2`      | Cliente           | 192.168.30.101  | Igual que pc1                                                                             |
+
+Los PCs (`pc1`, `pc2`) son Ubuntu con `ip`, `dhclient`, `ssh`, `ping`, `dig`, `curl`, `ftp` y el
+firewall **ufw activo**. Al arrancar, ufw abre solo el puerto **22 (SSH)** y bloquea las demás
+conexiones de entrada.
 
 ---
 
-## 1. Liberar el puerto 53 del host
+## 1. Teoría breve
 
-Ubuntu usa `systemd-resolved`, que ocupa el puerto 53 (`127.0.0.53`). El contenedor `dns`
-también lo necesita, así que hay que desactivar ese "stub". **Los 4 pasos son necesarios y en este orden.**
+### ¿Qué es un log?
+
+Es un archivo o salida donde un servicio anota **cada cosa que hace**: quién se conectó, qué
+pidió, qué respondió y si hubo errores. Leer logs sirve para saber si un servicio funciona y,
+si falla, por qué.
+
+En Docker hay dos lugares posibles para los logs:
+
+- **Archivo dentro del contenedor:** entras con `docker exec -it <contenedor> sh` y lo lees con `cat` o `tail -f`.
+- **Salida del contenedor (stdout/stderr):** cuando la imagen no escribe archivos, se lee desde el host con `docker logs <contenedor>`.
+
+### HTTP en una línea
+
+El navegador (cliente) pide un recurso con un **método** (`GET` = traer, `POST` = enviar datos)
+y el servidor contesta con un **código de estado**:
+
+- **200:** OK.
+- **404:** no existe.
+- **403:** existe o está protegido, pero no tienes permiso.
+
+### DNS: cómo funciona
+
+DNS traduce **nombres** a **direcciones IP**, como una agenda de contactos: tú sabes el nombre
+(`web.chema.osvp`) y DNS te da el número (`192.168.30.5`).
+
+```
+ pc1                         dns (192.168.30.4)                     Internet
+  |  ¿IP de web.chema.osvp?        |                                    |
+  |------------------------------->|  "chema.osvp es MI zona,           |
+  |  192.168.30.5                  |   lo busco en db.chema.osvp"       |
+  |<-------------------------------|                                    |
+  |  ¿IP de google.com?            |                                    |
+  |------------------------------->|  "no es mía: pregunto por ti"      |
+  |                                |----------------------------------->| 8.8.8.8
+  |  142.250.x.x                   |<-----------------------------------|
+  |<-------------------------------|                                    |
+```
+
+Conceptos clave:
+
+- **Zona y registros:** el servidor `dns` es **autoritativo** de la zona `chema.osvp`: tiene
+  la lista oficial de sus nombres en `bind/db.chema.osvp`. Cada línea es un **registro**. En esta
+  práctica usamos solo el tipo **A** (nombre → IPv4), por ejemplo `web IN A 192.168.30.5`.
+  Existen otros tipos: `AAAA` (IPv6), `MX` (correo) y `CNAME` (alias).
+- **Consulta recursiva:** el cliente le dice al servidor "encuéntrame la respuesta, cueste lo que
+  cueste". Si el nombre no es de su zona, el servidor pregunta a otros (los `forwarders`
+  `8.8.8.8` y `1.1.1.1`) y devuelve la respuesta final. `dig` la pide así por defecto, con la
+  bandera **RD** (*recursion desired*).
+- **Consulta no recursiva** (`dig +norecurse`): el cliente dice "contesta solo con lo que ya
+  sabes". Si el nombre es de su zona, responde igual. Si no, no sale a buscarlo y solo devuelve
+  pistas: los servidores raíz en la sección AUTHORITY.
+- **Códigos de respuesta:**
+  - `NOERROR`: todo bien.
+  - `NXDOMAIN`: ese nombre no existe.
+  - `SERVFAIL`: el servidor no pudo resolverlo, por ejemplo por falta de internet.
+- **¿Cómo sabe el PC cuál es su DNS?** Se lo da el servidor DHCP (`option domain-name-servers
+  192.168.30.4`) y queda escrito en `/etc/resolv.conf` del PC.
+- **Logs:** BIND puede anotar cada **pregunta** (`querylog yes`) y cada **respuesta**
+  (`responselog yes`). Ambas opciones están en `bind/named.conf.options`.
+
+### DHCP en una línea
+
+Un equipo nuevo no tiene IP y la pide con 4 mensajes, el proceso **DORA**:
+
+- **D**ISCOVER: "¿hay algún servidor DHCP?"
+- **O**FFER: "te ofrezco la `.100`"
+- **R**EQUEST: "la quiero"
+- **A**CK: "es tuya por 2 minutos"
+
+Antes de que termine ese tiempo, el cliente **renueva** (REQUEST + ACK). Al desconectarse puede
+**liberarla** (RELEASE).
+
+---
+
+## 2. Liberar el puerto 53 del host (una sola vez)
+
+El contenedor `dns` publica el puerto 53, que en Ubuntu ocupa `systemd-resolved`. Si ya lo
+hiciste en otra práctica, salta este paso.
 
 ```bash
 sudo mkdir -p /etc/systemd/resolved.conf.d
@@ -38,51 +124,16 @@ sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 sudo systemctl restart systemd-resolved
 ```
 
-Comprueba que quedó bien:
-
-```bash
-cat /etc/resolv.conf
-```
-
-Debe mostrar servidores reales (`nameserver 8.8.8.8`, `1.1.1.1` o el de tu router), **no** `127.0.0.53`.
-
-```bash
-sudo ss -lntup | grep ':53 '
-```
-
-No debe aparecer `systemd-resolve`.
-
-Por último, reinicia Docker para que tome el nuevo DNS:
-
 ```bash
 sudo systemctl restart docker
 ```
 
-<details>
-<summary>Revertir (dejar Ubuntu como estaba al terminar la práctica)</summary>
+Comprueba que `cat /etc/resolv.conf` **ya no** dice `127.0.0.53`.
 
-```bash
-sudo rm /etc/systemd/resolved.conf.d/disable-stub.conf
-```
-
-```bash
-sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-```
-
-```bash
-sudo systemctl restart systemd-resolved
-```
-
-</details>
-
-## 2. Levantar la práctica
+## 3. Levantar la práctica
 
 ```bash
 cd ~/ITQ-Admin_de_redes-Practicas/u3/p3-log
-```
-
-```bash
-chmod 644 bind/*
 ```
 
 ```bash
@@ -93,9 +144,11 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Los 6 contenedores (`dns`, `web`, `dhcp`, `ftp`, `pc1`, `pc2`) deben estar en `Up`.
+Los 6 contenedores deben aparecer en estado `Up`.
 
-## 3. Dar IP por DHCP a pc1 y pc2
+## 4. Dar IP por DHCP a los PCs
+
+Docker les pone una IP propia al arrancar. La quitamos y pedimos una al servidor DHCP:
 
 ```bash
 docker exec pc1 bash -c "ip addr flush dev eth0 && dhclient -v eth0"
@@ -105,34 +158,69 @@ docker exec pc1 bash -c "ip addr flush dev eth0 && dhclient -v eth0"
 docker exec pc2 bash -c "ip addr flush dev eth0 && dhclient -v eth0"
 ```
 
-Verifica que pc1 tiene `192.168.30.100` y que su DNS es `192.168.30.4`:
+Verifica la IP, el DNS recibido y el firewall:
 
 ```bash
-docker exec pc1 bash -c "hostname -I; cat /etc/resolv.conf"
+docker exec pc1 ip a show eth0
 ```
 
-> Si reinicias los contenedores, repite este paso: los pcs vuelven a la IP que les da Docker.
+```bash
+docker exec pc1 cat /etc/resolv.conf
+```
+
+```bash
+docker exec pc1 ufw status verbose
+```
+
+Debes ver `inet 192.168.30.100/24`, `nameserver 192.168.30.4` y `Status: active` con
+`22/tcp ALLOW IN`.
+
+**SSH** (contraseña `osvp2026`):
+
+```bash
+ssh root@192.168.30.100
+```
+
+```bash
+docker exec -it pc1 ssh root@pc2.chema.osvp
+```
+
+El primer comando conecta del host a pc1. El segundo conecta de pc1 a pc2 usando el DNS.
+
+> Los puertos publicados `2223` y `2224` solo sirven **antes** del paso 4: Docker los
+> reenvía a la IP original del contenedor, que borramos con `ip addr flush`. Después del DHCP,
+> entra por la IP: desde un host Linux la red de Docker se alcanza directamente.
+
+Para abrir otro puerto en el firewall de un PC (ejemplo, el 80):
+
+```bash
+docker exec pc1 ufw allow 80/tcp
+```
 
 ---
 
-## Cómo entrar a un contenedor
+## 5. Cómo ver los logs (resumen)
 
-Usa dos terminales: en una **entras al servidor** y sigues su log; en la otra **generas tráfico**
-desde pc1/pc2.
+Usa **dos terminales**: en la **Terminal 1** dejas el log abierto (`-f` = seguir en vivo,
+`Ctrl+C` para salir); en la **Terminal 2** generas el tráfico desde pc1/pc2.
 
-```bash
-docker exec -it web sh      # web usa Alpine: no tiene bash
-```
+| Servicio                 | Entrar al contenedor        | Ver el log en vivo                                                   |
+|--------------------------|-----------------------------|----------------------------------------------------------------------|
+| web (HTTP)               | `docker exec -it web sh`    | `tail -f /usr/local/apache2/logs/access_log /usr/local/apache2/logs/error_log` |
+| dns (DNS)                | `docker exec -it dns bash`  | *(sin archivo de log)* desde el host: `docker logs -f dns`           |
+| dhcp – mensajes          | —                           | *(sin archivo de log)* desde el host: `docker logs -f dhcp`          |
+| dhcp – arrendamientos    | `docker exec -it dhcp bash` | `tail -f /data/dhcpd.leases`                                         |
+| pc1 – su arrendamiento   | `docker exec -it pc1 bash`  | `cat /var/lib/dhcp/dhclient.leases`                                  |
+| ftp                      | `docker exec -it ftp bash`  | `tail -f /var/log/vsftpd.log`                                        |
 
-```bash
-docker exec -it dhcp bash   # también: dns, ftp, pc1, pc2
-```
-
-Para salir del contenedor escribe `exit`.
+`web` usa Alpine, que no tiene `bash`; por eso se entra con `sh`. Para salir de un
+contenedor: `exit`.
 
 ---
 
-## Parte 1 – Logs HTTP (contenedor `web`)
+## Parte 1 – Logs HTTP
+
+El servidor muestra su **página por defecto** ("It works!").
 
 **Terminal 1** – entra al servidor web y sigue sus logs:
 
@@ -141,67 +229,77 @@ docker exec -it web sh
 ```
 
 ```sh
-cd /usr/local/apache2/logs
+tail -f /usr/local/apache2/logs/access_log /usr/local/apache2/logs/error_log
 ```
 
-```sh
-ls -l
-```
-
-```sh
-tail -f access_log error_log
-```
-
-**Terminal 2** – genera peticiones:
+**Terminal 2** – una petición por cada caso:
 
 ```bash
-docker exec pc1 curl -i -A "Mozilla/5.0 (PracticaRedes-PC1)" http://web.chema.osvp/
+docker exec pc1 curl -i -A "Navegador-PC1" http://web.chema.osvp/
 ```
+
+Esta da 200 (GET) y lleva un User-Agent propio.
 
 ```bash
-docker exec pc1 curl -i http://web.chema.osvp/no_existe.html
+docker exec pc1 curl -i http://web.chema.osvp/noexiste.html
 ```
+
+Esta da 404.
 
 ```bash
-docker exec pc2 curl -i http://web.chema.osvp/secreto/privado.html
+docker exec pc2 curl -i http://web.chema.osvp/.htaccess
 ```
+
+Esta da 403: Apache protege los archivos `.ht*`.
 
 ```bash
-docker exec pc2 curl -i -X POST -d "usuario=chema&grupo=redes" http://web.chema.osvp/
+docker exec pc2 curl -i -X POST -d "usuario=chema" http://web.chema.osvp/
 ```
 
-Ejemplo de `access_log`:
+Esta es un POST (envío de formulario).
+
+**Lo que aparece en `access_log`:**
 
 ```
-192.168.30.100 - - [23/Nov/2026:17:28:03 +0000] "GET / HTTP/1.1" 200 42 "-" "Mozilla/5.0 (PracticaRedes-PC1)" rt=1009_us
-192.168.30.100 - - [23/Nov/2026:17:28:03 +0000] "GET /no_existe.html HTTP/1.1" 404 236 "-" "curl/7.81.0" rt=351_us
-192.168.30.101 - - [23/Nov/2026:17:28:03 +0000] "GET /secreto/privado.html HTTP/1.1" 403 239 "-" "curl/7.81.0" rt=277_us
-192.168.30.101 - - [23/Nov/2026:17:28:03 +0000] "POST / HTTP/1.1" 200 42 "-" "curl/7.81.0" rt=219_us
+192.168.30.100 [25/Nov/2026:14:13:45 +0000] "GET / HTTP/1.1" 200 191 "Navegador-PC1" 317us
+192.168.30.100 [25/Nov/2026:14:13:45 +0000] "GET /noexiste.html HTTP/1.1" 404 236 "curl/7.81.0" 288us
+192.168.30.101 [25/Nov/2026:14:13:45 +0000] "GET /.htaccess HTTP/1.1" 403 239 "curl/7.81.0" 188us
+192.168.30.101 [25/Nov/2026:14:13:45 +0000] "POST / HTTP/1.1" 200 191 "curl/7.81.0" 231us
 ```
 
-Ejemplo de `error_log`:
+**Lo que aparece en `error_log`:**
 
 ```
-[core:info] [client 192.168.30.100:39992] AH00128: File does not exist: /usr/local/apache2/htdocs/no_existe.html
-[authz_core:error] [client 192.168.30.101:52648] AH01630: client denied by server configuration: /usr/local/apache2/htdocs/secreto/privado.html
+[authz_core:error] [client 192.168.30.101:49000] AH01630: client denied by server configuration: /usr/local/apache2/htdocs/.htaccess
 ```
 
-| Qué identificar      | Dónde está                                                                  |
-|----------------------|------------------------------------------------------------------------------|
-| 200 OK               | `access_log`: `" 200 42`                                                     |
-| 404 Not Found        | `access_log`: `" 404`  ·  `error_log`: `AH00128 File does not exist`         |
-| 403 Forbidden        | `access_log`: `" 403`  ·  `error_log`: `AH01630 client denied`               |
-| Método GET / POST    | `"GET /…"` / `"POST /…"`                                                     |
-| IP de origen         | Primer campo de la línea (`192.168.30.100` = pc1, `.101` = pc2)             |
-| User-Agent           | Último texto entre comillas: `"Mozilla/5.0 (PracticaRedes-PC1)"`, `"curl/7.81.0"` |
-| Tiempo de respuesta  | `rt=…_us` al final (microsegundos)                                           |
+Cómo leer una línea de `access_log` (el formato está definido en `apache/httpd.conf`):
 
-## Parte 2 – Logs DNS (contenedor `dns`)
+```
+192.168.30.100  [25/Nov/2026:14:13:45 +0000]  "GET / HTTP/1.1"  200  191   "Navegador-PC1"  317us
+   IP origen         fecha y hora               método y ruta  código bytes   User-Agent     tiempo
+```
 
-> **Nota:** la imagen `ubuntu/bind9` arranca BIND con `named -g`, que **ignora** el bloque
-> `logging` de `named.conf.options` y envía todo a la salida del contenedor. Por eso el
-> DNS no guarda un archivo de log dentro del contenedor: se consulta con `docker logs`.
-> Dentro sí puedes revisar su configuración (`/etc/bind/`) y la zona (`/etc/bind/db.chema.osvp`).
+| Qué identificar      | Dónde está                                                            |
+|----------------------|------------------------------------------------------------------------|
+| 200 OK               | `"GET / HTTP/1.1" 200` y `"POST / HTTP/1.1" 200`                       |
+| 404 Not Found        | `"GET /noexiste.html HTTP/1.1" 404`                                    |
+| 403 Forbidden        | `"GET /.htaccess HTTP/1.1" 403` y, en `error_log`, `AH01630 client denied` |
+| Métodos GET / POST   | `"GET …"` / `"POST …"`                                                 |
+| IP de origen         | Primer campo: `192.168.30.100` = pc1, `192.168.30.101` = pc2          |
+| User-Agent           | Entre comillas: `"Navegador-PC1"` (puesto con `-A`), `"curl/7.81.0"` (por defecto) |
+| Tiempo de respuesta  | Último campo: `317us` = 317 microsegundos = 0.317 ms                  |
+
+---
+
+## Parte 2 – Logs DNS
+
+Para la demostración usamos **un solo tipo de consulta: A** (nombre → IPv4).
+
+> **Sin archivo de log:** la imagen `ubuntu/bind9` arranca BIND en primer plano (`named -g`) y
+> manda todos sus mensajes a la salida del contenedor, sin escribir archivos. Por eso se usa
+> `docker logs dns`. Dentro del contenedor sí puedes ver la configuración y la zona:
+> `docker exec dns cat /etc/bind/db.chema.osvp`.
 
 **Terminal 1:**
 
@@ -209,61 +307,93 @@ Ejemplo de `error_log`:
 docker logs -f dns
 ```
 
-**Terminal 2:**
+**Terminal 2** – 4 consultas tipo A:
 
 ```bash
 docker exec pc1 dig web.chema.osvp A
 ```
 
-```bash
-docker exec pc1 dig web.chema.osvp AAAA
-```
+Consulta exitosa: el nombre está en nuestra zona.
 
 ```bash
-docker exec pc1 dig www.chema.osvp CNAME
+docker exec pc1 dig noexiste.chema.osvp A
 ```
 
-```bash
-docker exec pc1 dig chema.osvp MX
-```
+Error de resolución: NXDOMAIN.
 
 ```bash
 docker exec pc1 dig google.com A
 ```
 
-```bash
-docker exec pc1 dig +norecurse web.chema.osvp A
-```
+Consulta recursiva: el DNS sale a internet.
 
 ```bash
-docker exec pc1 dig servidor-fantasma.chema.osvp A
+docker exec pc1 dig +norecurse google.com A
 ```
 
-Ejemplo del log:
+Consulta no recursiva: el DNS no sale a buscarla.
+
+**La respuesta en el cliente (`dig`)**, por ejemplo para `web.chema.osvp`:
 
 ```
-client @0x7fa6… 192.168.30.100#35683 (web.chema.osvp): query: web.chema.osvp IN AAAA +E(0)K (192.168.30.4)
-client @0x7fa6… 192.168.30.100#42432 (chema.osvp): query: chema.osvp IN MX +E(0)K (192.168.30.4)
-client @0x7fa6… 192.168.30.100#50493 (web.chema.osvp): query: web.chema.osvp IN A -E(0)K (192.168.30.4)
-client @0x7fa6… 192.168.30.100#55062 (servidor-fantasma.chema.osvp): query: servidor-fantasma.chema.osvp IN A +E(0)K (192.168.30.4)
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 32220
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+;; ANSWER SECTION:
+web.chema.osvp.		86400	IN	A	192.168.30.5
 ```
 
-| Qué identificar           | Dónde está                                                                      |
-|---------------------------|----------------------------------------------------------------------------------|
-| Tipo de consulta          | `IN A`, `IN AAAA`, `IN MX`, `IN CNAME`                                          |
-| Dominio consultado        | `(web.chema.osvp)` y después de `query:`                                        |
-| Respuesta proporcionada   | El log del servidor solo guarda la pregunta; la respuesta está en `dig`: `ANSWER SECTION` y `status:` |
-| Recursiva / no recursiva  | `+` = recursión solicitada · `-` = no recursiva (`dig +norecurse`)              |
-| Error NXDOMAIN            | `dig` muestra `status: NXDOMAIN` para `servidor-fantasma.chema.osvp`            |
-| Origen de la consulta     | `192.168.30.100#35683` = IP y puerto del cliente                                |
+- `status`: el código de respuesta.
+- `aa`: la respuesta es autoritativa (es nuestra zona).
+- `rd`: el cliente pidió recursión.
+- `ra`: el servidor la permite.
+- `ANSWER`: la IP que se respondió.
 
-`AAAA` de `web.chema.osvp` responde `NOERROR` con `ANSWER: 0`: el nombre existe, pero no tiene IPv6.
+**Lo que aparece en `docker logs dns`:** por cada consulta salen dos líneas, una `query:`
+(pregunta) y otra `response:` (respuesta).
 
-## Parte 3 – Logs DHCP (contenedor `dhcp`)
+```
+192.168.30.100#59575 (web.chema.osvp): query: web.chema.osvp IN A +E(0)K (192.168.30.4)
+192.168.30.100#59575 (web.chema.osvp): response: web.chema.osvp IN A NOERROR 1 0 1 +E(0)K (192.168.30.4)
+192.168.30.100#41144 (noexiste.chema.osvp): query: noexiste.chema.osvp IN A +E(0)K (192.168.30.4)
+192.168.30.100#41144 (noexiste.chema.osvp): response: noexiste.chema.osvp IN A NXDOMAIN 0 1 1 +E(0)K (192.168.30.4)
+192.168.30.100#44119 (google.com): query: google.com IN A -E(0)K (192.168.30.4)
+192.168.30.100#44119 (google.com): response: google.com IN A NOERROR 0 13 1 -E(0)K (192.168.30.4)
+```
 
-`dhcpd` guarda las concesiones **dentro** del contenedor en `/data/dhcpd.leases`. Los mensajes
-`DISCOVER/OFFER/REQUEST/ACK` no van a un archivo, porque el contenedor no tiene servidor syslog,
-así que se ven con `docker logs dhcp`.
+Cómo leer una línea:
+
+```
+192.168.30.100#59575  (web.chema.osvp): response: web.chema.osvp IN A  NOERROR  1 0 1   +      (192.168.30.4)
+ IP#puerto origen        dominio                                  tipo  código  conteos recursión  IP del servidor
+```
+
+- **Conteos `1 0 1`:** número de registros en las secciones ANSWER, AUTHORITY y ADDITIONAL.
+  Un `1` en ANSWER significa que sí hubo respuesta.
+- **Recursión:** `+` = recursiva (RD activado); `-` = no recursiva.
+- **Otras letras:** `E` = el cliente usa EDNS; `K` = envía una *cookie* DNS.
+
+| Qué identificar             | Dónde está                                                                   |
+|-----------------------------|-------------------------------------------------------------------------------|
+| Tipo de consulta            | `IN A`                                                                        |
+| Dominios consultados        | `(web.chema.osvp)`, `(noexiste.chema.osvp)`, `(google.com)`                   |
+| Respuestas proporcionadas   | Línea `response:` → `NOERROR 1 0 1`, `NXDOMAIN …`; la IP concreta está en `dig` (ANSWER) |
+| Recursiva vs no recursiva   | `+` en `dig google.com` · `-` en `dig +norecurse google.com`: responde `NOERROR 0 13 1`, sin respuesta (0), solo 13 pistas (los servidores raíz) |
+| Error NXDOMAIN              | `response: noexiste.chema.osvp IN A NXDOMAIN` · en `dig`: `status: NXDOMAIN` |
+| Origen de las consultas     | `192.168.30.100#59575` = IP y puerto del cliente (pc1)                        |
+
+Con internet, la consulta recursiva a `google.com` devuelve `NOERROR` con un `1` en ANSWER.
+Si tu red bloquea el DNS externo verás `SERVFAIL`, que también es un error para documentar.
+
+---
+
+## Parte 3 – Logs DHCP
+
+La concesión dura **2 minutos** (`default-lease-time 120` en `dhcpd.conf`), así que los PCs
+**renuevan solos cada minuto** y lo verás en el log sin hacer nada.
+
+> **Sin archivo de log:** `dhcpd` envía sus mensajes por syslog y el contenedor no tiene un
+> servidor syslog. Por eso los mensajes se ven con `docker logs dhcp`. Lo que **sí** guarda
+> dentro del contenedor es el archivo de **arrendamientos**: `/data/dhcpd.leases`.
 
 **Terminal 1** – mensajes del servidor:
 
@@ -271,122 +401,127 @@ así que se ven con `docker logs dhcp`.
 docker logs -f dhcp
 ```
 
-**Terminal 3 (opcional)** – entra y revisa las concesiones:
+**Terminal 3 (opcional)** – arrendamientos dentro del contenedor:
 
 ```bash
 docker exec -it dhcp bash
 ```
 
 ```bash
-cat /data/dhcpd.leases
+tail -f /data/dhcpd.leases
 ```
 
-**Terminal 2** – genera los eventos:
+**Terminal 2** – genera los eventos en este orden:
 
-**a) Liberación (DHCPRELEASE):**
-
-```bash
-docker exec pc1 dhclient -r -v eth0
-```
-
-**b) Asignación completa (DISCOVER → OFFER → REQUEST → ACK):**
+**a) Asignación (DORA):** ya ocurrió en el paso 4. Repítela con pc1 si quieres:
 
 ```bash
 docker exec pc1 dhclient -v eth0
 ```
 
-**c) Renovación** (pc2 vuelve a pedir la IP que ya tiene → solo REQUEST + ACK):
+**b) Renovación:** no hagas nada; espera 1 minuto y mira la Terminal 1.
+
+**c) Liberación:**
 
 ```bash
-docker exec pc2 dhclient -v eth0
+docker exec pc1 dhclient -r -v eth0
 ```
 
-**d) Conflicto: IP ya en uso.** pc2 se asigna a mano una IP libre del rango (`.102`) y luego
-llega un cliente nuevo: una interfaz virtual en pc1 con otra MAC. El servidor hace ping antes de
-ofrecer la IP, alguien responde y la descarta.
+```bash
+docker exec pc1 dhclient -v eth0
+```
+
+El primero libera la IP y el segundo vuelve a pedirla (DORA completo).
+
+**d) Conflicto de IP:** pc2 se pone **a mano** la `192.168.30.102`, la siguiente libre. Luego
+llega un "equipo nuevo": pc1 cambia su MAC. Antes de ofrecer una IP, el servidor hace ping
+(`ping-check true`). Como pc2 responde, la marca como ocupada y ofrece otra.
 
 ```bash
 docker exec pc2 ip addr add 192.168.30.102/24 dev eth0
 ```
 
 ```bash
-docker exec pc1 bash -c "ip link add nuevo0 link eth0 type macvlan mode bridge && ip link set nuevo0 up && dhclient -v -1 -sf /bin/true -lf /tmp/nuevo.leases -pf /tmp/nuevo.pid nuevo0"
+docker exec pc1 bash -c "ip link set eth0 down && ip link set eth0 address 02:00:00:00:00:99 && ip link set eth0 up && dhclient -v eth0"
 ```
 
-Limpieza:
-
-```bash
-docker exec pc1 bash -c "dhclient -x -sf /bin/true -pf /tmp/nuevo.pid; ip link del nuevo0"
-```
+Para dejar todo como estaba:
 
 ```bash
 docker exec pc2 ip addr del 192.168.30.102/24 dev eth0
 ```
 
-> Si `.102` ya estaba concedida, usa la siguiente IP del rango que no aparezca en `/data/dhcpd.leases`.
-
-**e) Conflicto: un cliente pide la IP de otro.** pc2 solicita `192.168.30.100`, que es de pc1,
-y el servidor la rechaza con `DHCPNAK`. Con `-sf /bin/true`, pc2 no cambia su configuración.
-
 ```bash
-docker exec pc2 bash -c 'printf "lease {\n  interface \"eth0\";\n  fixed-address 192.168.30.100;\n  expire 4 2030/01/01 00:00:00;\n}\n" > /tmp/c.leases && dhclient -v -1 -sf /bin/true -lf /tmp/c.leases -pf /tmp/c.pid eth0'
+docker compose restart pc1
 ```
 
 ```bash
-docker exec pc2 dhclient -x -sf /bin/true -pf /tmp/c.pid
+docker exec pc1 bash -c "ip addr flush dev eth0 && dhclient -v eth0"
 ```
 
-**f) La concesión vista desde el cliente:**
+**e) El arrendamiento visto desde el cliente:**
 
 ```bash
-docker exec -it pc1 bash
+docker exec pc2 cat /var/lib/dhcp/dhclient.leases
 ```
 
-```bash
-cat /var/lib/dhcp/dhclient.leases
-```
-
-Ejemplo de `docker logs dhcp`:
+**Lo que aparece en `docker logs dhcp`:**
 
 ```
-DHCPRELEASE of 192.168.30.100 from f6:fa:83:35:d1:32 (pc1) via eth0 (found)
-DHCPDISCOVER from f6:fa:83:35:d1:32 (pc1) via eth0
-DHCPOFFER on 192.168.30.100 to f6:fa:83:35:d1:32 (pc1) via eth0
-DHCPREQUEST for 192.168.30.100 (192.168.30.254) from f6:fa:83:35:d1:32 (pc1) via eth0
-DHCPACK on 192.168.30.100 to f6:fa:83:35:d1:32 (pc1) via eth0
-DHCPREQUEST for 192.168.30.101 from 82:71:56:0a:13:ab (pc2) via eth0
-DHCPACK on 192.168.30.101 to 82:71:56:0a:13:ab (pc2) via eth0
-ICMP Echo reply while lease 192.168.30.102 valid.
+DHCPDISCOVER from 02:00:00:00:00:01 via eth0                                       <- a) DORA
+DHCPOFFER on 192.168.30.100 to 02:00:00:00:00:01 (pc1) via eth0
+DHCPREQUEST for 192.168.30.100 (192.168.30.254) from 02:00:00:00:00:01 (pc1) via eth0
+DHCPACK on 192.168.30.100 to 02:00:00:00:00:01 (pc1) via eth0
+DHCPREQUEST for 192.168.30.101 from 02:00:00:00:00:02 (pc2) via eth0               <- b) renovación
+DHCPACK on 192.168.30.101 to 02:00:00:00:00:02 (pc2) via eth0
+DHCPRELEASE of 192.168.30.100 from 02:00:00:00:00:01 (pc1) via eth0 (found)        <- c) liberación
+ICMP Echo reply while lease 192.168.30.102 valid.                                  <- d) conflicto
 Abandoning IP address 192.168.30.102: pinged before offer
-DHCPREQUEST for 192.168.30.100 from 82:71:56:0a:13:ab via eth0: lease 192.168.30.100 unavailable.
-DHCPNAK on 192.168.30.100 to 82:71:56:0a:13:ab via eth0
+DHCPOFFER on 192.168.30.103 to 02:00:00:00:00:99 (pc1) via eth0
 ```
 
-Ejemplo de `/data/dhcpd.leases`:
+**Lo que hay en `/data/dhcpd.leases` (servidor):**
 
 ```
-lease 192.168.30.100 {
-  starts 1 2026/11/23 17:28:06;
-  ends 1 2026/11/23 17:38:06;
+lease 192.168.30.101 {
+  starts 3 2026/11/25 14:13:23;
+  ends 3 2026/11/25 14:15:23;
   binding state active;
-  hardware ethernet f6:fa:83:35:d1:32;
-  client-hostname "pc1";
+  hardware ethernet 02:00:00:00:00:02;
+  client-hostname "pc2";
 }
 lease 192.168.30.102 {
   binding state abandoned;
 }
 ```
 
-| Qué identificar                   | Dónde está                                                                   |
-|-----------------------------------|-------------------------------------------------------------------------------|
-| DISCOVER / OFFER / REQUEST / ACK  | `docker logs dhcp`                                                            |
-| MAC del cliente                   | `from f6:fa:83:35:d1:32 (pc1)` · `hardware ethernet` en `dhcpd.leases`       |
-| IP asignada y tiempo de concesión | `DHCPACK on 192.168.30.100` · `starts`/`ends` (600 s = `default-lease-time`) · en el cliente: `dhcp-lease-time`, `renew`, `rebind`, `expire` |
-| Renovación                        | `DHCPREQUEST` + `DHCPACK` **sin** `DHCPDISCOVER` antes                        |
-| Liberación                        | `DHCPRELEASE of … (found)` → la IP pasa a `binding state free`                |
-| Conflictos de IP                  | `Abandoning IP address … pinged before offer` / `binding state abandoned` / `lease … unavailable` + `DHCPNAK` |
+**Lo que hay en `/var/lib/dhcp/dhclient.leases` (cliente pc2):**
 
-## Extra – Logs FTP (contenedor `ftp`)
+```
+lease {
+  fixed-address 192.168.30.101;
+  option dhcp-lease-time 120;
+  option domain-name-servers 192.168.30.4;
+  renew 3 2026/11/25 14:14:19;
+  rebind 3 2026/11/25 14:15:08;
+  expire 3 2026/11/25 14:15:23;
+}
+```
+
+| Qué identificar                    | Dónde está                                                                      |
+|------------------------------------|----------------------------------------------------------------------------------|
+| DISCOVER / OFFER / REQUEST / ACK   | `docker logs dhcp` (a)                                                           |
+| MAC de los clientes                | `from 02:00:00:00:00:01 (pc1)` · `hardware ethernet` en `dhcpd.leases`. Son fijas: pc1 `…:01`, pc2 `…:02` |
+| IP asignada y tiempo de concesión  | `DHCPACK on 192.168.30.100` · `starts`/`ends` (2 min) · en el cliente: `dhcp-lease-time 120`, `renew`, `expire` |
+| Renovaciones                       | `DHCPREQUEST` + `DHCPACK` **sin** DISCOVER antes, cada ~1 minuto (b)             |
+| Liberación (DHCPRELEASE)           | `DHCPRELEASE of 192.168.30.100 … (found)` (c)                                    |
+| Conflicto de IP                    | `ICMP Echo reply …` + `Abandoning IP address …: pinged before offer` · `binding state abandoned` (d) |
+
+Las fechas de `dhcpd.leases` están en **UTC** (en México, 6 horas más que la hora local).
+
+---
+
+## Extra – Logs FTP
 
 **Terminal 1:**
 
@@ -398,7 +533,7 @@ docker exec -it ftp bash
 tail -f /var/log/vsftpd.log
 ```
 
-**Terminal 2** – login correcto y login fallido:
+**Terminal 2** – un login correcto y uno fallido:
 
 ```bash
 docker exec pc1 bash -c 'ftp -inv ftp.chema.osvp <<EOF
@@ -410,15 +545,15 @@ EOF'
 
 ```bash
 docker exec pc1 bash -c 'ftp -inv ftp.chema.osvp <<EOF
-user alumno clave_incorrecta
+user alumno mala
 bye
 EOF'
 ```
 
 ```
-[pid 19] CONNECT: Client "192.168.30.100"
-[pid 18] [alumno] OK LOGIN: Client "192.168.30.100"
-[pid 21] [alumno] FAIL LOGIN: Client "192.168.30.100"
+CONNECT: Client "192.168.30.100"
+[alumno] OK LOGIN: Client "192.168.30.100"
+[alumno] FAIL LOGIN: Client "192.168.30.100"
 ```
 
 ## Apagar
@@ -427,151 +562,39 @@ EOF'
 docker compose down
 ```
 
-Al bajar los contenedores se borran también sus logs.
+Al bajar los contenedores también se borran sus logs.
 
 ---
 
 ## Errores comunes
 
-### `lookup registry-1.docker.io on 127.0.0.53:53 … connection refused`
-
-```
-failed to resolve source metadata for docker.io/library/ubuntu:22.04 ...
-dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: read udp ...: connection refused
-```
-
-**Causa:** desactivaste el stub (`DNSStubListener=no`), pero `/etc/resolv.conf` sigue apuntando a
-`127.0.0.53`, donde ya no escucha nadie. Al host (y a Docker) se le quedó sin DNS.
-
-**Solución:** completa el paso 1 (sobre todo el `ln -sf` y el reinicio), revisa que
-`cat /etc/resolv.conf` ya no diga `127.0.0.53` y reinicia Docker:
-
-```bash
-sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-```
-
-```bash
-sudo systemctl restart systemd-resolved
-```
-
-```bash
-sudo systemctl restart docker
-```
-
-Si `/etc/resolv.conf` queda **sin** ninguna línea `nameserver`, falta la línea `DNS=8.8.8.8 1.1.1.1`
-en `/etc/systemd/resolved.conf.d/disable-stub.conf` (paso 1).
-
-### Puerto ocupado: `Bind for 0.0.0.0:53 failed: port is already allocated` / `address already in use`
-
-Otro programa usa el puerto. Revisa quién es:
-
-```bash
-sudo ss -lntup | grep -E ':(53|80|21) '
-```
-
-- **53** → `systemd-resolved`: haz el paso 1. Si es `named` o `dnsmasq` del host: `sudo systemctl stop named` / `sudo systemctl stop dnsmasq`.
-- **80** → Apache o Nginx del host: `sudo systemctl stop apache2` / `sudo systemctl stop nginx`.
-- **21** → vsftpd del host: `sudo systemctl stop vsftpd`.
-- Un contenedor de otra práctica: ver el siguiente error.
-
-### `The container name "/dns" is already in use` o `Pool overlaps with other one on this address space`
-
-Los contenedores o la red de la práctica anterior (`u2`) siguen activos: usan los mismos
-nombres (`dns`, `dhcp`, `pc1`, `pc2`) y la misma subred `192.168.30.0/24`. Bájalos:
-
-```bash
-cd ~/ITQ-Admin_de_redes-Practicas/u2/p2-dhcp && docker compose down
-```
-
-O elimínalos directamente:
-
-```bash
-docker rm -f dns dhcp web ftp pc1 pc2
-```
-
-```bash
-docker network prune
-```
-
-### `429 Too Many Requests` al descargar imágenes
-
-Docker Hub limita las descargas anónimas. Espera unos minutos e intenta otra vez, o inicia sesión:
-
-```bash
-docker login
-```
-
-### `permission denied while trying to connect to the Docker daemon socket`
-
-Tu usuario no está en el grupo `docker`:
-
-```bash
-sudo usermod -aG docker $USER
-```
-
-Cierra sesión y vuelve a entrar (o ejecuta `newgrp docker`).
-
-### `curl: (6) Could not resolve host: web.chema.osvp` en pc1/pc2
-
-El pc no tiene la IP ni el DNS del DHCP: falta el paso 3 o reiniciaste los contenedores. Revisa:
-
-```bash
-docker exec pc1 cat /etc/resolv.conf
-```
-
-Debe decir `nameserver 192.168.30.4`. Si no, repite el paso 3.
-
-### Un contenedor se reinicia una y otra vez (`Restarting` en `docker compose ps`)
-
-Casi siempre es un error de sintaxis en su configuración. Revisa su salida:
-
-```bash
-docker logs dns
-```
-
-```bash
-docker logs web
-```
-
-```bash
-docker logs dhcp
-```
-
-- `dns`: revisa `bind/*.conf` y `bind/db.chema.osvp` (punto final en los nombres, paréntesis del SOA). Comprueba los permisos con `chmod 644 bind/*`.
-- `web`: error en `apache/httpd.conf` (la línea aparece en el log).
-- `dhcp`: error en `dhcpd.conf` (falta un `;` o una `}`).
-
-### `dig google.com` no responde o da `SERVFAIL`
-
-El contenedor `dns` reenvía a `8.8.8.8` y `1.1.1.1`. Si tu red bloquea ese tráfico DNS
-(redes escolares o corporativas), la consulta externa falla. Las consultas a `chema.osvp`
-siguen funcionando.
+| Error | Causa y solución |
+|-------|------------------|
+| `lookup registry-1.docker.io on 127.0.0.53:53 … connection refused` | Se desactivó el stub DNS pero `/etc/resolv.conf` sigue apuntando a `127.0.0.53`. Repite el paso 2 completo (sobre todo `ln -sf` y los reinicios). |
+| `Bind for 0.0.0.0:53 failed: port is already allocated` o `address already in use` | Algo del host usa el puerto. Revisa con `sudo ss -lntup \| grep -E ':(53\|80\|21) '`. El 53 suele ser systemd-resolved (paso 2); el 80, `apache2`/`nginx` (`sudo systemctl stop apache2`); el 21, `vsftpd` (`sudo systemctl stop vsftpd`). |
+| `container name "/dns" is already in use` o `Pool overlaps with other one` | La práctica de `u2` sigue levantada: usa los mismos nombres y la misma subred. `cd ../../u2/p2-dhcp && docker compose down`. |
+| `429 Too Many Requests` | Límite de descargas de Docker Hub. Espera unos minutos o usa `docker login`. |
+| `permission denied … docker.sock` | `sudo usermod -aG docker $USER` y vuelve a iniciar sesión. |
+| `Could not resolve host: web.chema.osvp` en un PC | Al PC le falta el paso 4: no tiene el DNS `192.168.30.4` en `/etc/resolv.conf`. |
+| `ssh -p 2223 localhost` no responde | Después del DHCP entra por la IP: `ssh root@192.168.30.100` (ver paso 4). |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | Reconstruiste los PCs y cambió su llave SSH: `ssh-keygen -R 192.168.30.100`. |
+| Un contenedor queda en `Restarting` | Error de sintaxis en su configuración: mira `docker logs <contenedor>` y revisa el archivo que menciona (`bind/*`, `apache/httpd.conf` o `dhcpd.conf`). |
+| `AVISO: no se pudo activar ufw` en `docker logs pc1` | El kernel del host no permitió el firewall en el contenedor. La práctica funciona igual, pero sin firewall en ese PC. |
 
 ---
 
-## Archivos de la práctica
+## Archivos
 
 ```
 p3-log/
-├── .env
-├── compose.yaml
-├── Dockerfile.pc
-├── dhcpd.conf
+├── .env                  # IPs, puertos y contraseñas
+├── compose.yaml          # los 6 contenedores
+├── Dockerfile.pc         # imagen de pc1/pc2: ip, dhclient, ssh, ufw, dig, curl, ftp
+├── dhcpd.conf            # rango .100–.150, concesión de 2 min, ping-check
 ├── bind/
-│   ├── named.conf.local
-│   ├── named.conf.options
-│   └── db.chema.osvp
+│   ├── named.conf.options   # recursión, forwarders, querylog y responselog
+│   ├── named.conf.local     # declara la zona chema.osvp
+│   └── db.chema.osvp        # registros A de la zona
 └── apache/
-    ├── httpd.conf          # logs en /usr/local/apache2/logs/ (dentro del contenedor)
-    └── html/
-        ├── index.html
-        └── secreto/privado.html
+    └── httpd.conf        # página por defecto, protección .ht*, formato del log con User-Agent y tiempo
 ```
-
-**Ajustes respecto al documento original:**
-
-- `apache/httpd.conf` guarda los logs dentro del contenedor (`logs/access_log`, `logs/error_log`).
-  `LogLevel warn core:info` registra también los 404 en `error_log`.
-- `Dockerfile.pc` permite que `dhclient` aplique el DNS recibido por DHCP dentro del contenedor,
-  y añade `netbase`, que el cliente `ftp` necesita.
-- `compose.yaml` (ftp): un `command` que también muestra `/var/log/vsftpd.log` en `docker logs ftp`.
