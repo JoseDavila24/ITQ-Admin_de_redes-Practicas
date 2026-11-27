@@ -76,11 +76,11 @@ dig MX gmail.com @<IP_UBUNTU>
 # CNAME - recursiva
 dig CNAME www.google.com @<IP_UBUNTU>
 
-# Repetir: la segunda sale de caché (cached)
+# Repetir: la segunda sale de caché (cached). Solo A, AAAA y NXDOMAIN se cachean
 dig A google.com @<IP_UBUNTU>
 dig A google.com @<IP_UBUNTU>
 
-# No recursiva explícita
+# Sin recursión pedida (bit RD=0): compara los flags con la consulta anterior
 dig A google.com @<IP_UBUNTU> +norecurse
 
 # NXDOMAIN
@@ -106,6 +106,13 @@ docker exec -it dns-server grep NXDOMAIN /var/log/dnsmasq.log
 ```
 
 En el log: `query[TIPO]` (tipo y dominio), `from <IP>` (origen), `forwarded` (recursiva), `cached` / `config` (no recursiva), `reply ... is <valor>` (respuesta), `reply ... is NXDOMAIN` (error).
+
+> **Recursiva vs no recursiva:**
+> - **En el log de dnsmasq** la diferencia es `forwarded` (tuvo que preguntar a 8.8.8.8) frente a `config` / `cached` (respondió él mismo).
+> - **`+norecurse` no cambia el log:** dnsmasq igual reenvía la consulta y sale `forwarded`, aunque la tenga en caché.
+> - **El bit RD se ve en la salida de `dig`:** con recursión pedida, `flags: qr rd ra`; con `+norecurse`, `flags: qr aa ra` (sin `rd`).
+>
+> **Caché:** esta versión de dnsmasq (2.86) solo cachea A, AAAA y NXDOMAIN. Las consultas MX y CNAME salen siempre como `forwarded`.
 
 ### HTTP por nombre: `http://chema.osvp` (desde Fedora)
 
