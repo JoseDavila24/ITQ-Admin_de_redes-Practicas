@@ -16,6 +16,7 @@ cd ~/ITQ-Admin_de_redes-Practicas/u3/p1-log && docker compose up -d --build
 | :--- | :--- | :--- |
 | Fedora | Wireshark y tshark | `sudo dnf install wireshark` y `sudo usermod -aG wireshark $USER` (cierra sesión y vuelve a entrar para capturar sin `sudo`) |
 | Ubuntu | tcpdump | `sudo apt install tcpdump` |
+| Fedora | Suricata (IDS) | Ver [IDS-suricata.md](IDS-suricata.md): alertas en vivo y análisis de los `.pcap` de esta práctica |
 
 | Parte | Dónde se captura | Por qué |
 | :--- | :--- | :--- |
