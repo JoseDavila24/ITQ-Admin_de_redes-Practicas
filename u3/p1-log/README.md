@@ -16,23 +16,21 @@ docker compose up -d --build
 # 200 OK - GET
 curl -i http://<IP_UBUNTU>/
 
-# 200 OK - POST (envío de formulario)
+# 200 OK - POST (envío de datos)
 curl -i -X POST -d "dato=prueba" http://<IP_UBUNTU>/
 
 # 404 Not Found
 curl -i http://<IP_UBUNTU>/noexiste
 
-# 403 Forbidden - directorio protegido
-curl -i http://<IP_UBUNTU>/privado/
-
-# 403 Forbidden - archivo .htaccess
+# 403 Forbidden - Apache bloquea por defecto todo lo que empieza con .ht
 curl -i http://<IP_UBUNTU>/.htaccess
+curl -i http://<IP_UBUNTU>/.htpasswd
 
 # User-Agent distinto
 curl -i -A "Mozilla/5.0 (X11; Fedora; Linux x86_64) Firefox/133.0" http://<IP_UBUNTU>/
 ```
 
-También puedes abrir `http://<IP_UBUNTU>/` en un navegador y enviar el formulario.
+Se usa la página por defecto de Apache ("It works!"). También puedes abrir `http://<IP_UBUNTU>/` en un navegador para ver su User-Agent en el log.
 
 ### Logs
 
@@ -73,12 +71,11 @@ dig AAAA google.com @<IP_UBUNTU>
 # MX - recursiva
 dig MX gmail.com @<IP_UBUNTU>
 
-# CNAME - recursiva
-dig CNAME www.google.com @<IP_UBUNTU>
+# CNAME - recursiva (www.github.com es un alias de github.com)
+dig CNAME www.github.com @<IP_UBUNTU>
 
 # Repetir: la segunda sale de caché (cached). Solo A, AAAA y NXDOMAIN se cachean
-dig A google.com @<IP_UBUNTU>
-dig A google.com @<IP_UBUNTU>
+dig A google.com @<IP_UBUNTU>; dig A google.com @<IP_UBUNTU>
 
 # Sin recursión pedida (bit RD=0): compara los flags con la consulta anterior
 dig A google.com @<IP_UBUNTU> +norecurse
@@ -126,7 +123,7 @@ sudo resolvectl dns <interfaz> <IP_UBUNTU>
 
 ```bash
 curl -i http://chema.osvp/
-curl -i http://chema.osvp/privado/
+curl -i http://chema.osvp/.htaccess
 ```
 
 También funciona en el navegador de Fedora: `http://chema.osvp`.

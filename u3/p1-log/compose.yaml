@@ -18,7 +18,6 @@ services:
     network_mode: host
     volumes:
       - ./http/httpd-logs.conf:/usr/local/apache2/conf/extra/httpd-logs.conf:ro
-      - ./http/htdocs:/usr/local/apache2/htdocs:ro
     # Añade un Include a httpd.conf (una sola vez) y arranca Apache en primer plano
     command: >
       sh -c "grep -q 'httpd-logs.conf' /usr/local/apache2/conf/httpd.conf ||
