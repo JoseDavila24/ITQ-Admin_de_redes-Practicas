@@ -187,7 +187,7 @@ docker exec -it kea-server grep -E "DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK|D
 ```
 
 ```bash
-docker exec -it kea-server cat /var/lib/kea/kea-leases4.csv
+docker exec -it kea-server cat /var/lib/kea/kea-leases4.csv | column -t -s ','
 ```
 
 En el log: `[hwtype=1 <MAC>]` (MAC del cliente), `DHCP4_LEASE_ALLOC ... lease <IP> has been allocated for 120 seconds` (IP y tiempo de concesión), `DHCP4_LEASE_REUSE` (renovación), `DHCP4_RELEASE` (liberación), `DHCPNAK (type 6)` (conflicto).
