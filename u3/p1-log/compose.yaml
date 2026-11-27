@@ -1,0 +1,103 @@
+name: practica-u3-p1-logs
+
+# ---------------------------------------------------------------------------
+# HTTP y DNS  -> red del host (Ubuntu). Usan los puertos 80 y 53 ya abiertos
+#               en ufw y los logs muestran la IP real del cliente (Fedora).
+# DHCP + PCs  -> red bridge AISLADA "red-dhcp" (interfaz br-dhcp en el host).
+#               Kea NUNCA toca la LAN real, así no compite con el DHCP que le
+#               da la IP a tu Ubuntu.
+# ---------------------------------------------------------------------------
+
+services:
+
+  # ----------------------------- Parte 1: HTTP -----------------------------
+  web-server:
+    image: httpd:alpine
+    container_name: web-server
+    hostname: web-server
+    network_mode: host
+    volumes:
+      - ./http/httpd-logs.conf:/usr/local/apache2/conf/extra/httpd-logs.conf:ro
+      - ./http/htdocs:/usr/local/apache2/htdocs:ro
+    # Añade un Include a httpd.conf (una sola vez) y arranca Apache en primer plano
+    command: >
+      sh -c "grep -q 'httpd-logs.conf' /usr/local/apache2/conf/httpd.conf ||
+             echo 'Include conf/extra/httpd-logs.conf' >> /usr/local/apache2/conf/httpd.conf;
+             exec httpd-foreground"
+
+  # ----------------------------- Parte 2: DNS ------------------------------
+  dns-server:
+    image: joelnb/dnsmasq:latest
+    container_name: dns-server
+    hostname: dns-server
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
+    # El dominio local y su IP vienen del archivo .env
+    command:
+      - /usr/sbin/dnsmasq
+      - --keep-in-foreground
+      - --address=/${DOMINIO}/${DOMINIO_IP}
+
+  # ----------------------------- Parte 3: DHCP -----------------------------
+  kea-server:
+    image: scjalliance/kea-dhcp4-minimal:3.2
+    container_name: kea-server
+    hostname: kea-server
+    user: root
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      red-dhcp:
+        ipv4_address: 192.168.50.2
+    volumes:
+      - ./dhcp/kea-dhcp4.conf:/etc/kea/kea-dhcp4.conf:ro
+    # Borra un PID viejo (si el contenedor se reinició) para que Kea no crea que ya corre
+    command: >
+      sh -c "rm -f /var/run/kea/*.pid /run/kea/*.pid;
+             exec kea-dhcp4 -c /etc/kea/kea-dhcp4.conf"
+
+  pc1:
+    build:
+      context: .
+      dockerfile: Dockerfile.pc
+    image: pc-cliente:latest
+    container_name: pc1
+    hostname: pc1
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - red-dhcp
+    depends_on:
+      - kea-server
+
+  pc2:
+    build:
+      context: .
+      dockerfile: Dockerfile.pc
+    image: pc-cliente:latest
+    container_name: pc2
+    hostname: pc2
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - red-dhcp
+    depends_on:
+      - kea-server
+
+networks:
+  red-dhcp:
+    name: red-dhcp
+    driver: bridge
+    driver_opts:
+      # Nombre fijo de la interfaz en Ubuntu -> para capturar con tcpdump/Wireshark
+      com.docker.network.bridge.name: br-dhcp
+    ipam:
+      config:
+        - subnet: 192.168.50.0/24
+          # Docker solo reparte .1-.6; el pool de Kea (.10-.50) queda libre
+          ip_range: 192.168.50.0/29
+          gateway: 192.168.50.1
