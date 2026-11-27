@@ -35,6 +35,11 @@ services:
       - NET_ADMIN
     volumes:
       - ./dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
+    # El dominio local y su IP vienen del archivo .env
+    command:
+      - /usr/sbin/dnsmasq
+      - --keep-in-foreground
+      - --address=/${DOMINIO}/${DOMINIO_IP}
 
   # ----------------------------- Parte 3: DHCP -----------------------------
   kea-server:
