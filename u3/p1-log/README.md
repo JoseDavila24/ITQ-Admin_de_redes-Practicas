@@ -4,7 +4,9 @@
 docker compose up -d --build
 ```
 
-> Sustituye `<IP_UBUNTU>` por la IP del servidor Ubuntu (`hostname -I`). El dominio y la IP que devuelve el DNS se cambian en `.env`.
+> Sustituye `<IP_UBUNTU>` por la IP del servidor Ubuntu (`hostname -I`).
+>
+> `chema.osvp` apunta automáticamente a la IP de tu Ubuntu (se ve en `docker logs dns-server`). El dominio y la IP se pueden cambiar en `.env`. Si DHCP le cambia la IP a Ubuntu, ejecuta `docker compose restart dns-server`.
 
 ---
 
@@ -62,7 +64,7 @@ IP_ORIGEN - - [FECHA] "MÉTODO /ruta HTTP/1.1" CÓDIGO BYTES "Referer" "User-Age
 ## Parte 2: DNS (desde otra máquina)
 
 ```bash
-# A - dominio local (respuesta de config, no recursiva)
+# A - dominio local (respuesta de config, no recursiva) -> devuelve <IP_UBUNTU>
 dig A chema.osvp @<IP_UBUNTU>
 
 # AAAA - recursiva (forwarded)
@@ -74,11 +76,11 @@ dig MX gmail.com @<IP_UBUNTU>
 # CNAME - recursiva
 dig CNAME www.google.com @<IP_UBUNTU>
 
-# Repetir: la segunda sale de caché (cached)
+# Repetir: la segunda sale de caché (cached). Solo A, AAAA y NXDOMAIN se cachean
 dig A google.com @<IP_UBUNTU>
 dig A google.com @<IP_UBUNTU>
 
-# No recursiva explícita
+# Sin recursión pedida (bit RD=0): compara los flags con la consulta anterior
 dig A google.com @<IP_UBUNTU> +norecurse
 
 # NXDOMAIN
@@ -104,6 +106,41 @@ docker exec -it dns-server grep NXDOMAIN /var/log/dnsmasq.log
 ```
 
 En el log: `query[TIPO]` (tipo y dominio), `from <IP>` (origen), `forwarded` (recursiva), `cached` / `config` (no recursiva), `reply ... is <valor>` (respuesta), `reply ... is NXDOMAIN` (error).
+
+> **Recursiva vs no recursiva:**
+> - **En el log de dnsmasq** la diferencia es `forwarded` (tuvo que preguntar a 8.8.8.8) frente a `config` / `cached` (respondió él mismo).
+> - **`+norecurse` no cambia el log:** dnsmasq igual reenvía la consulta y sale `forwarded`, aunque la tenga en caché.
+> - **El bit RD se ve en la salida de `dig`:** con recursión pedida, `flags: qr rd ra`; con `+norecurse`, `flags: qr aa ra` (sin `rd`).
+>
+> **Caché:** esta versión de dnsmasq (2.86) solo cachea A, AAAA y NXDOMAIN. Las consultas MX y CNAME salen siempre como `forwarded`.
+
+### HTTP por nombre: `http://chema.osvp` (desde Fedora)
+
+Haz que Fedora use tu dnsmasq como DNS (temporal). Cambia `<interfaz>` por la de Fedora, que ves con `ip a` (por ejemplo `enp1s0`):
+
+```bash
+sudo resolvectl dns <interfaz> <IP_UBUNTU>
+```
+
+> Fedora enviará **todas** sus consultas a tu dnsmasq. Internet sigue funcionando, porque dnsmasq reenvía lo externo a 8.8.8.8, pero en el log también verás las consultas que Fedora hace en segundo plano.
+
+```bash
+curl -i http://chema.osvp/
+curl -i http://chema.osvp/privado/
+```
+
+También funciona en el navegador de Fedora: `http://chema.osvp`.
+
+Una sola petición deja rastro en los dos logs:
+
+- `/var/log/dnsmasq.log` → `query[A] chema.osvp from <IP_FEDORA>` y `config chema.osvp is <IP_UBUNTU>`
+- `/usr/local/apache2/logs/access.log` → `"GET / HTTP/1.1" 200 ...`
+
+Para dejar el DNS de Fedora como estaba:
+
+```bash
+sudo resolvectl revert <interfaz>
+```
 
 ---
 

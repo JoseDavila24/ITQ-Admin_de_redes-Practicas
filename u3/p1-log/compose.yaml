@@ -35,11 +35,19 @@ services:
       - NET_ADMIN
     volumes:
       - ./dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
-    # El dominio local y su IP vienen del archivo .env
+    # El dominio local viene de .env. Si DOMINIO_IP está vacío, se usa la IP
+    # con la que Ubuntu sale a la red (se detecta al arrancar el contenedor).
+    environment:
+      DOMINIO: ${DOMINIO:-chema.osvp}
+      DOMINIO_IP: ${DOMINIO_IP:-}
     command:
-      - /usr/sbin/dnsmasq
-      - --keep-in-foreground
-      - --address=/${DOMINIO}/${DOMINIO_IP}
+      - sh
+      - -c
+      - |
+        IP="$${DOMINIO_IP:-$$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($$i=="src") print $$(i+1)}')}"
+        [ -z "$$IP" ] && echo "AVISO: no se detectó la IP de Ubuntu; pon DOMINIO_IP en .env"
+        echo "dnsmasq: $$DOMINIO -> $$IP"
+        exec /usr/sbin/dnsmasq --keep-in-foreground --address=/$$DOMINIO/$$IP
 
   # ----------------------------- Parte 3: DHCP -----------------------------
   kea-server:
