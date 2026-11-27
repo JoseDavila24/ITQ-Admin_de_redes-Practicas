@@ -1,14 +1,12 @@
 # Práctica U3-P2: Monitoreo de tráfico HTTP, DNS y DHCP
 
-Si tienes levantada la práctica `u3/p1-log`, bájala primero (usa los mismos puertos y la misma red):
+Esta práctica reutiliza los servicios de [`u3/p1-log`](../p1-log). Aquí no se levanta nada nuevo: solo se captura su tráfico. En Ubuntu:
 
 ```bash
-cd ~/ITQ-Admin_de_redes-Practicas/u3/p1-log && docker compose down
+cd ~/ITQ-Admin_de_redes-Practicas/u3/p1-log && docker compose up -d --build
 ```
 
-```bash
-cd ~/ITQ-Admin_de_redes-Practicas/u3/p2-monitoreo && docker compose up -d --build
-```
+> Todos los comandos `docker compose` de esta guía se ejecutan dentro de `u3/p1-log`.
 
 > Sustituye `<IP_UBUNTU>` por la IP del servidor Ubuntu (`hostname -I`) y `<interfaz>` por la interfaz de red de Fedora (`ip a`, por ejemplo `enp1s0`).
 
@@ -29,18 +27,24 @@ cd ~/ITQ-Admin_de_redes-Practicas/u3/p2-monitoreo && docker compose up -d --buil
 
 ## Parte 1: Análisis del protocolo HTTP
 
-### Contenido disponible
+### Preparación: contenido de distintos tipos (en Ubuntu)
 
-Al arrancar, `web-server` crea estos archivos junto a la página por defecto ("It works!"):
+`web-server` solo trae la página por defecto ("It works!"). Para comparar tiempos entre tipos de contenido, crea estos archivos dentro del contenedor:
+
+```bash
+docker exec web-server sh -c 'cd /usr/local/apache2/htdocs && echo "Hola, esto es texto plano." > texto.txt && echo "{\"practica\": \"p2-monitoreo\", \"ok\": true}" > datos.json && cp ../icons/apache_pb.png imagen.png && dd if=/dev/urandom of=grande.bin bs=1M count=10 2>/dev/null && mkdir -p carpeta && echo "<h1>Carpeta</h1>" > carpeta/index.html && ls -l'
+```
 
 | URL | Tipo | Tamaño |
 | :--- | :--- | :--- |
 | `/` | `text/html` | 191 B |
 | `/texto.txt` | `text/plain` | 27 B |
-| `/datos.json` | `application/json` | 62 B |
+| `/datos.json` | `application/json` | 41 B |
 | `/imagen.png` | `image/png` | ~9 KB |
 | `/grande.bin` | `application/octet-stream` | 10 MB |
 | `/carpeta/` | directorio (para el 301) | – |
+
+> Los archivos se conservan con `docker compose restart`, pero se borran si el contenedor se recrea (`docker compose down` y `up`). En ese caso, repite este comando.
 
 ### 1. Iniciar la captura en Fedora
 
@@ -214,7 +218,7 @@ tshark -r dns-ubuntu.pcap -Y "frame.number == 2" -O dns
 
 Las PCs `pc1` y `pc2` están en la red aislada `red-dhcp` (192.168.50.0/24) con `kea-server` (192.168.50.2). Kea entrega concesiones de **120 s**, con renovación (T1) a los **60 s** y rebind (T2) a los **90 s**.
 
-Usa **dos terminales SSH** al Ubuntu: una para capturar y otra para los comandos (esta última, dentro de `~/ITQ-Admin_de_redes-Practicas/u3/p2-monitoreo`).
+Usa **dos terminales SSH** al Ubuntu: una para capturar y otra para los comandos (esta última, dentro de `~/ITQ-Admin_de_redes-Practicas/u3/p1-log`).
 
 ### 1. Iniciar la captura (terminal 1)
 
@@ -297,5 +301,5 @@ Ejemplo real de esta práctica (tiempos en segundos desde el inicio de la captur
 ## Detener
 
 ```bash
-docker compose down
+cd ~/ITQ-Admin_de_redes-Practicas/u3/p1-log && docker compose down
 ```
